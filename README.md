@@ -66,8 +66,8 @@ Team 14 did not author these external packages. The project-specific integration
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/lloyd9179/UIUC-SE494-Fall-2025---Team-14.git
-cd UIUC-SE494-Fall-2025---Team-14
+git clone https://github.com/lloyd9179/Railcar-Spray-Coating-Automation.git
+cd Railcar-Spray-Coating-Automation
 ```
 
 ### 2. Install prerequisites
