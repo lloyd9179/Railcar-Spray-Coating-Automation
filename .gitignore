@@ -1,4 +1,10 @@
 # Build and development artifacts
+assets/*
+!assets/images/
+assets/images/*
+!assets/images/demo.gif
+!assets/images/Screenshot.png
+!assets/images/Screenshot2.png
 build/
 install/
 log/
