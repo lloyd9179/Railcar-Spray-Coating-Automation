@@ -201,6 +201,7 @@ The `path_exp` package installs these ROS 2 executables:
 - `traj_spiral` — CAD-style spiral trajectory over the tank-head geometry.
 - `traj_rings` — concentric ring trajectory experiment.
 - `traj_rings_completed` — main ring trajectory sequence with the custom tool TCP.
+- `traj_rings_completed_original` — original MoveIt execution version kept for comparison or fallback.
 - `test_gripper` — UR digital IO gripper test through `/io_and_status_controller/set_io`.
 
 If you are not sure which launch files are available, search inside `src/`:

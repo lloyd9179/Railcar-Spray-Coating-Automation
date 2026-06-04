@@ -12,7 +12,7 @@ import math
 
 # MoveIt related messages, services, and actions
 from moveit_msgs.msg import MoveItErrorCodes, Constraints, JointConstraint, RobotTrajectory, PositionConstraint, OrientationConstraint
-from moveit_msgs.action import MoveGroup
+from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import Pose, Quaternion, PoseStamped
@@ -23,8 +23,6 @@ from scipy.spatial.transform import Rotation
 import time
 ###############################################
 from ur_msgs.srv import SetIO
-from action_msgs.msg import GoalStatus
-from control_msgs.action import FollowJointTrajectory
 
 ###################################
 from moveit_msgs.srv import ApplyPlanningScene
@@ -44,18 +42,6 @@ def moveit_error_code_to_string(val):
         if value == val:
             return name
     return "UNKNOWN_ERROR_CODE"
-
-def follow_joint_trajectory_error_code_to_string(val):
-    """Translates a FollowJointTrajectory result code to a string for debugging."""
-    error_dict = {
-        FollowJointTrajectory.Result.SUCCESSFUL: "SUCCESSFUL",
-        FollowJointTrajectory.Result.INVALID_GOAL: "INVALID_GOAL",
-        FollowJointTrajectory.Result.INVALID_JOINTS: "INVALID_JOINTS",
-        FollowJointTrajectory.Result.OLD_HEADER_TIMESTAMP: "OLD_HEADER_TIMESTAMP",
-        FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED: "PATH_TOLERANCE_VIOLATED",
-        FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED: "GOAL_TOLERANCE_VIOLATED",
-    }
-    return error_dict.get(val, "UNKNOWN_ERROR_CODE")
 
 def rescale_trajectory_time(trajectory: RobotTrajectory, time_scaling_factor: float) -> RobotTrajectory:
     """
@@ -134,11 +120,9 @@ class RingController(Node):
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint" #################################
         ]
-        self.declare_parameter("trajectory_controller", "scaled_joint_trajectory_controller")
         self._move_group_action_client = ActionClient(self, MoveGroup, '/move_action')
+        self._execute_trajectory_action_client = ActionClient(self, ExecuteTrajectory, '/execute_trajectory')
         self._cartesian_path_service_client = self.create_client(GetCartesianPath, '/compute_cartesian_path')
-        self._follow_joint_trajectory_action_client = None
-        self.active_trajectory_controller = None
         self._joint_state_sub = self.create_subscription(
             JointState, 'joint_states', self.joint_state_callback, 10)
         self.current_joint_state = None
@@ -153,10 +137,8 @@ class RingController(Node):
     def wait_for_ready(self):
         self.get_logger().info("Waiting for all services to be ready...")
         self._move_group_action_client.wait_for_server()
+        self._execute_trajectory_action_client.wait_for_server()
         self._cartesian_path_service_client.wait_for_service()
-        if not self._connect_trajectory_controller():
-            self.get_logger().error("No FollowJointTrajectory controller action server is available.")
-            return False
 
         self._apply_planning_scene_client.wait_for_service()
         self.get_logger().info("scene is ready")
@@ -165,69 +147,6 @@ class RingController(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
         self.get_logger().info("All services are ready! Ready to plan.")
         return True
-
-    def _connect_trajectory_controller(self):
-        preferred_controller = self.get_parameter("trajectory_controller").value
-        controller_candidates = [
-            preferred_controller,
-            "scaled_joint_trajectory_controller",
-            "joint_trajectory_controller",
-        ]
-        for controller_name in dict.fromkeys(name for name in controller_candidates if name):
-            action_name = f"/{controller_name}/follow_joint_trajectory"
-            self.get_logger().info(f" - Waiting for trajectory controller action {action_name}...")
-            client = ActionClient(self, FollowJointTrajectory, action_name)
-            if client.wait_for_server(timeout_sec=3.0):
-                self._follow_joint_trajectory_action_client = client
-                self.active_trajectory_controller = controller_name
-                self.get_logger().info(f"Using trajectory controller: {controller_name}")
-                return True
-        return False
-
-    def _execute_joint_trajectory(self, trajectory: RobotTrajectory):
-        joint_trajectory = trajectory.joint_trajectory
-        if not joint_trajectory.points:
-            self.get_logger().error("Planned trajectory has no points.")
-            return False
-        if self._follow_joint_trajectory_action_client is None:
-            self.get_logger().error("Trajectory controller action client is not connected.")
-            return False
-
-        # A zero header stamp asks the controller to start the trajectory immediately.
-        joint_trajectory.header.stamp.sec = 0
-        joint_trajectory.header.stamp.nanosec = 0
-
-        execute_goal = FollowJointTrajectory.Goal()
-        execute_goal.trajectory = joint_trajectory
-        execute_goal.goal_time_tolerance = Duration(sec=1, nanosec=0)
-
-        self.get_logger().info(
-            f"Sending trajectory to {self.active_trajectory_controller} "
-            f"with {len(joint_trajectory.points)} points..."
-        )
-        execute_future = self._follow_joint_trajectory_action_client.send_goal_async(execute_goal)
-        rclpy.spin_until_future_complete(self, execute_future)
-        goal_handle = execute_future.result()
-        if goal_handle is None or not goal_handle.accepted:
-            self.get_logger().error("Trajectory execution goal was rejected by controller.")
-            return False
-
-        self.get_logger().info("Trajectory execution in progress...")
-        execute_result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, execute_result_future)
-        result_response = execute_result_future.result()
-        result = result_response.result
-        error_string = follow_joint_trajectory_error_code_to_string(result.error_code)
-        if (
-            result_response.status == GoalStatus.STATUS_SUCCEEDED
-            and result.error_code == FollowJointTrajectory.Result.SUCCESSFUL
-        ):
-            self.get_logger().info(f"Trajectory execution successful! Result: {error_string}")
-            return True
-
-        detail = f" Controller message: {result.error_string}" if result.error_string else ""
-        self.get_logger().error(f"Trajectory execution failed: {error_string}.{detail}")
-        return False
 
     # plan_and_execute_joint_goal is unchanged.
     def plan_and_execute_joint_goal(self, goal_joint_positions, vel_scale=0.1, acc_scale=0.1):
@@ -242,7 +161,6 @@ class RingController(Node):
         request.allowed_planning_time = 5.0
         request.max_velocity_scaling_factor = vel_scale
         request.max_acceleration_scaling_factor = acc_scale
-        goal_msg.planning_options.plan_only = True
         request.start_state.joint_state = self.current_joint_state
         request.start_state.is_diff = True
         goal_constraints = Constraints()
@@ -266,10 +184,10 @@ class RingController(Node):
         result = result_future.result().result
         error_string = moveit_error_code_to_string(result.error_code.val)
         if result.error_code.val == MoveItErrorCodes.SUCCESS:
-            self.get_logger().info(f"Planning succeeded! Result: {error_string}")
-            return self._execute_joint_trajectory(result.planned_trajectory)
+            self.get_logger().info(f"Motion succeeded! Result: {error_string}")
+            return True
         else:
-            self.get_logger().error(f"Planning failed! Result: {error_string}")
+            self.get_logger().error(f"Motion failed! Result: {error_string}")
             return False
 #################
     def add_obstacle_table(self):
@@ -324,7 +242,6 @@ class RingController(Node):
         request.group_name = self.move_group_name
         request.num_planning_attempts = 10
         request.allowed_planning_time = 5.0
-        goal_msg.planning_options.plan_only = True
         request.start_state.joint_state = self.current_joint_state
         request.start_state.is_diff = True
         
@@ -348,10 +265,10 @@ class RingController(Node):
         error_string = moveit_error_code_to_string(result.error_code.val)
 
         if result.error_code.val == MoveItErrorCodes.SUCCESS:
-            self.get_logger().info(f"Pose planning succeeded! Result: {error_string}")
-            return self._execute_joint_trajectory(result.planned_trajectory)
+            self.get_logger().info(f"Move to pose succeeded! Result: {error_string}")
+            return True
         else:
-            self.get_logger().error(f"Pose planning failed! Result: {error_string}")
+            self.get_logger().error(f"Move to pose failed! Result: {error_string}")
             return False
 
     def _create_pose_constraints(self, pose_stamped: PoseStamped) -> Constraints:
@@ -402,7 +319,29 @@ class RingController(Node):
         self.get_logger().info(f"Rescaling trajectory time by a factor of {time_scaling_factor}...")
         rescaled_trajectory = rescale_trajectory_time(response.solution, time_scaling_factor)
         self.get_logger().info("Planning successful. Preparing to execute trajectory...")
-        return self._execute_joint_trajectory(rescaled_trajectory)
+        execute_goal = ExecuteTrajectory.Goal()
+        execute_goal.trajectory = rescaled_trajectory
+        # if x == 0:
+        #     self.get_logger().info(f" At the start position of Ring {i+1}. triggering....")
+        #     time.sleep(3.0)
+        execute_future = self._execute_trajectory_action_client.send_goal_async(execute_goal)
+        rclpy.spin_until_future_complete(self, execute_future)
+        goal_handle = execute_future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error("Trajectory execution goal was rejected by server.")
+            return False
+        self.get_logger().info("Trajectory execution in progress...")
+
+        execute_result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, execute_result_future)
+        final_result = execute_result_future.result().result
+        if final_result.error_code.val == MoveItErrorCodes.SUCCESS:
+            self.get_logger().info("Trajectory execution successful!")
+            return True
+        else:
+            error_string = moveit_error_code_to_string(final_result.error_code.val)
+            self.get_logger().error(f"Trajectory execution failed: {error_string}")
+            return False
             
     ### MODIFIED PRIMARY METHOD ###
     def plan_and_execute_rings(self, start_joint_goal):

@@ -30,6 +30,7 @@ setup(
             'traj_spiral = path_exp.cad_traj_spiral:main',
             'traj_rings = path_exp.cad_traj_rings:main',
             'traj_rings_completed = path_exp.traj_ring_completed:main',
+            'traj_rings_completed_original = path_exp.traj_ring_completed_original:main',
             'test_gripper = path_exp.test_gripper:main',
            
         ],
